@@ -3160,6 +3160,23 @@ function +vi-git-untracked() {
   VCS_WORKDIR_HALF_DIRTY=true
 }
 
+function +vi-hg-untracked() {
+  [[ -z "${vcs_comm[hgdir]}" || "${vcs_comm[hgdir]}" == "." ]] && return
+
+  # get the root for the current repo or submodule
+  local repoTopLevel="$(hg root 2> /dev/null)"
+  # dump out if we're outside a hg repository (which includes being in the .hg folder)
+  [[ $? != 0 || -z $repoTopLevel ]] && return
+
+  local untrackedFiles="$(hg status -u 2> /dev/null)"
+
+  [[ -z $untrackedFiles ]] && return
+
+  hook_com[unstaged]+=" $(print_icon 'VCS_UNTRACKED_ICON')"
+  VCS_WORKDIR_HALF_DIRTY=true
+}
+
+
 function +vi-git-aheadbehind() {
   local ahead behind
   local -a gitstatus
@@ -3176,6 +3193,21 @@ function +vi-git-aheadbehind() {
 
   hook_com[misc]+=${(j::)gitstatus}
 }
+
+
+function +vi-hg-aheadbehind() {
+	local ahead behind
+  local -a hgstatus
+
+  ahead=$(hg prompt '{outgoing|count}')
+  (( ahead )) && hgstatus+=( " %F{$POWERLEVEL9K_VCS_FOREGROUND}$(print_icon 'VCS_OUTGOING_CHANGES_ICON')${ahead// /}%f" )
+
+  behind=$(hg prompt '{incoming|count}')
+  (( behind )) && hgstatus+=( " %F{$POWERLEVEL9K_VCS_FOREGROUND}$(print_icon 'VCS_INCOMING_CHANGES_ICON')${behind// /}%f" )
+
+  hook_com[misc]+=${(j::)hgstatus}
+}
+
 
 function +vi-git-remotebranch() {
   local remote
@@ -3249,15 +3281,52 @@ function +vi-git-stash() {
   fi
 }
 
+function +vi-hg-shelve() {
+  local -a shelves=( "$(hg shelve --list | wc -l)" )
+  if [[ $shelves -ne 0 ]]; then
+    hook_com[misc]+=" %F{$POWERLEVEL9K_VCS_FOREGROUND}$(print_icon 'VCS_STASH_ICON')${shelves// /}%f"
+  fi
+}
+
 function +vi-hg-bookmarks() {
-  if [[ -n "${hgbmarks[@]}" ]]; then
-    hook_com[hg-bookmark-string]=" $(print_icon 'VCS_BOOKMARK_ICON')${hgbmarks[@]}"
+	local otherbmarks
+
+	# The original code here relied on the zsh function in /usr/share/zsh/functions/VCS_Info/Backends/VCS_INFO_get_data_hg
+	#   However, there's a bug in that code ;-)
+	#   Specifically, when it looks for the active bookmark, the code there simply looks at the hashcode of the current
+	#   changeset and compares it to the hashcode for each bookmark. This means that when you're at a revision which
+	#   happens to have a bookmark, it'll look like you're at that bookmark, even though you're not.
+	#
+  #if [[ -n "${hgbmarks[@]}" ]]; then
+  #  hook_com[hg-bookmark-string]=" $(print_icon 'VCS_BOOKMARK_ICON')${hgbmarks[@]}"
+  #
+  #  # To signal that we want to use the sting we just generated, set the special
+  #  # variable `ret' to something other than the default zero:
+  #  ret=1
+  #  return 0
+  #fi
+
+  if [[ -n ${curbm} ]]; then
+		# This removes the current bookmark from the array of bookmarks also at this same changeset
+		hgbmarks[(i)$curbm]=()
+
+		if [[ -n "${hgbmarks[@]}" ]]; then
+			otherbmarks="("${hgbmarks[@]}")"
+		fi
+
+    hook_com[hg-bookmark-string]=" $(print_icon 'VCS_BOOKMARK_ICON')${curbm} $otherbmarks"
 
     # To signal that we want to use the sting we just generated, set the special
     # variable `ret' to something other than the default zero:
     ret=1
-    return 0
+  else
+    # If we don't unset this, then the zsh function (see the powerlevel9k.zsh-theme line:
+    #   zstyle ':vcs_info:hg*:*' get-bookmarks true
+    # causes the bookmark to still show up.
+		unset hgbmarks
   fi
+
+  return 0
 }
 
 function +vi-vcs-detect-changes() {
@@ -3450,6 +3519,12 @@ function _p9k_vcs_render() {
   (( ${_POWERLEVEL9K_VCS_GIT_HOOKS[(I)git-stash]} )) || VCS_STATUS_STASHES=0
   (( ${_POWERLEVEL9K_VCS_GIT_HOOKS[(I)git-remotebranch]} )) || VCS_STATUS_REMOTE_BRANCH=""
   (( ${_POWERLEVEL9K_VCS_GIT_HOOKS[(I)git-tagname]} )) || VCS_STATUS_TAG=""
+
+  (( ${_POWERLEVEL9K_VCS_HG_HOOKS[(I)hg-untracked]} )) || VCS_STATUS_HAS_UNTRACKED=0
+  (( ${_POWERLEVEL9K_VCS_HG_HOOKS[(I)hg-aheadbehind]} )) || { VCS_STATUS_COMMITS_AHEAD=0 && VCS_STATUS_COMMITS_BEHIND=0 }
+  (( ${_POWERLEVEL9K_VCS_HG_HOOKS[(I)hg-shelve]} )) || VCS_STATUS_STASHES=0
+  #(( ${_POWERLEVEL9K_VCS_HG_HOOKS[(I)git-remotebranch]} )) || VCS_STATUS_REMOTE_BRANCH=""
+  #(( ${_POWERLEVEL9K_VCS_HG_HOOKS[(I)git-tagname]} )) || VCS_STATUS_TAG=""
 
   (( _POWERLEVEL9K_VCS_COMMITS_AHEAD_MAX_NUM >= 0 && VCS_STATUS_COMMITS_AHEAD > _POWERLEVEL9K_VCS_COMMITS_AHEAD_MAX_NUM )) &&
     VCS_STATUS_COMMITS_AHEAD=$_POWERLEVEL9K_VCS_COMMITS_AHEAD_MAX_NUM
@@ -6318,7 +6393,7 @@ _p9k_init_params() {
   _p9k_declare -b POWERLEVEL9K_SHOW_CHANGESET 0
   _p9k_declare -e POWERLEVEL9K_VCS_LOADING_TEXT loading
   _p9k_declare -a POWERLEVEL9K_VCS_GIT_HOOKS -- vcs-detect-changes git-untracked git-aheadbehind git-stash git-remotebranch git-tagname
-  _p9k_declare -a POWERLEVEL9K_VCS_HG_HOOKS -- vcs-detect-changes
+  _p9k_declare -a POWERLEVEL9K_VCS_HG_HOOKS -- vcs-detect-changes hg-untracked hg-aheadbehind hg-shelve
   _p9k_declare -a POWERLEVEL9K_VCS_SVN_HOOKS -- vcs-detect-changes svn-detect-changes
   # If it takes longer than this to fetch git repo status, display the prompt with a greyed out
   # vcs segment and fix it asynchronously when the results come it.
